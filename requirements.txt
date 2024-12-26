@@ -1,0 +1,5 @@
+certifi==2024.12.14
+idna==3.10
+ollama==0.4.4
+requests==2.32.3
+urllib3==2.3.0
