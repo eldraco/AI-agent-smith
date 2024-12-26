@@ -35,6 +35,7 @@ import logging
 from datetime import datetime
 import os
 from collections import deque
+import re
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 #MODEL = "llama3.1"  # Change this to your preferred model
@@ -145,7 +146,7 @@ def handle_incoming_message(message, sock):
         chat_history.add_message('Assistant', ollama_response)
 
         # Send response back through the socket
-        response_message = f"Agent Eva: {ollama_response}"
+        response_message = f"Agent Smith: {ollama_response}"
         response_message += '\n'
         sock.send(response_message.encode('utf-8'))
         logging.info("Response sent back to chat")
@@ -169,7 +170,8 @@ def receive_messages(sock):
             logging.info(f"Received new message from chat: {data}")
 
             # Process all non-empty messages
-            if data.strip():
+            clean_data = re.sub(r'^<\w+>', '', data)
+            if clean_data.strip():
                 processing_thread = threading.Thread(
                     target=handle_incoming_message,
                     args=(data, sock)
