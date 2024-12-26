@@ -30,20 +30,96 @@ import argparse
 import threading
 import sys
 import socket
+import json
+import requests
+import logging
+from datetime import datetime
+import os
+
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL = "llama3.1"  # Change this to your preferred model
+
+def setup_logging():
+    """Setup logging configuration"""
+    # Create logs directory if it doesn't exist
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    
+    # Create a timestamp for the log file
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = f'logs/chat_session_{timestamp}.log'
+    
+    # Configure logging format and settings
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return log_file
+
+def query_ollama(prompt):
+    """Send a prompt to Ollama and return the response"""
+    try:
+        logging.info(f"Sending prompt to Ollama (length: {len(prompt)} chars)")
+        data = {
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False
+        }
+        response = requests.post(OLLAMA_URL, json=data)
+        response.raise_for_status()
+        logging.info(f"Received response from Ollama (length: {len(response_text)} chars)")
+        return response.json()['response']
+    except Exception as e:
+        logging.error(f"Error querying Ollama: {e}"
+        return f"Error querying Ollama: {e}"
+
+def handle_incoming_message(message, sock):
+    """Process incoming message through Ollama and send response back"""
+    try:
+        # Get response from Ollama
+        ollama_response = query_ollama(message)
+        logging.info(f"Processing message: {message[:10000]}..." if len(message) > 10000 else f"Processing message: {message}")
+
+        # Send response back through the socket
+        response_message = f"Agent Smith: {ollama_response}"
+        response_message += '\n'
+        sock.send(response_message.encode('utf-8'))
+        logging.info("Response sent back to chat")
+    except Exception as e:
+        error_message = f"Error processing message: {e}"
+        logging.error(error_message)
+        sock.send(error_message.encode('utf-8'))
 
 def receive_messages(sock):
-    """Receive and print messages from the server"""
+    """Receive messages from the server and process them through Ollama"""
     while True:
         try:
             data = sock.recv(1024).decode('utf-8')
             if not data:
+                logging.warning("Disconnected from server")
                 print("\nDisconnected from server")
                 sys.exit(0)
-            print(f"\nReceived: {data}")
-            print("Your message: ", end='', flush=True)
+
+            logging.info(f"Received new message from chat (length: {len(data)} chars)")
+            
+            print(f"\nReceived message: {data}")
+            # Process message through Ollama in a separate thread
+            processing_thread = threading.Thread(
+                target=handle_incoming_message,
+                args=(data, sock)
+            )
+            processing_thread.start()
+            logging.info("Started processing thread for message")
+            
         except Exception as e:
-            print(f"\nError receiving message: {e}")
+            logging.error(f"Error receiving message: {e}")
             sys.exit(1)
+
 
 def main():
     print('AIAgent Smith: An AI Agent to follow your orders.')
@@ -83,33 +159,39 @@ def main():
                         type=int)
     args = parser.parse_args()
 
+    # Setup logging
+    log_file = setup_logging()
+    logging.info(f"Starting new chat session. Log file: {log_file}")
+
     # Create socket and connect to the ncat server
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((args.chatserverip, args.chatserverport))
-        print(f"Connected to {args.chatserverip}:{args.chatserverport}")
+        logging.info(f"Successfully connected to chat server at {host}:{port}")
+        logging.info(f"Using Ollama model: {MODEL}")
     except Exception as e:
-        print(f"Failed to connect: {e}")
+        logging.error(f"Failed to connect to chat server: {e}")
         sys.exit(1)
-    
-    # Start receive thread
+
+    # Start receive thread from the chat server
     receive_thread = threading.Thread(target=receive_messages, args=(sock,))
     receive_thread.daemon = True
     receive_thread.start()
+    logging.info("Message receiving thread started")
     
-    # Main send loop
+    # Keep the main thread running
     try:
         while True:
-            message = input("Your message: ")
-            if message.lower() == 'quit':
-                break
-            message += '\n'
-            sock.send(message.encode('utf-8'))
+            # Just keep the program running
+            threading.Event().wait()
     except KeyboardInterrupt:
         print("\nClosing connection...")
+        logging.info("Received shutdown signal")
     except Exception as e:
-        print(f"Error sending message: {e}")
+        print(f"Error: {e}")
+        logging.error(f"Unexpected error: {e}")
     finally:
+        logging.info("Closing connection and ending session")
         sock.close()
 
 if __name__ == '__main__':
