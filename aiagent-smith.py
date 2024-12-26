@@ -72,10 +72,11 @@ def query_ollama(prompt):
         }
         response = requests.post(OLLAMA_URL, json=data)
         response.raise_for_status()
+        response_text = response.json()['response']
         logging.info(f"Received response from Ollama (length: {len(response_text)} chars)")
-        return response.json()['response']
+        return response_text
     except Exception as e:
-        logging.error(f"Error querying Ollama: {e}"
+        logging.error(f"Error querying Ollama: {e}")
         return f"Error querying Ollama: {e}"
 
 def handle_incoming_message(message, sock):
@@ -167,7 +168,7 @@ def main():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((args.chatserverip, args.chatserverport))
-        logging.info(f"Successfully connected to chat server at {host}:{port}")
+        logging.info(f"Successfully connected to chat server at {args.chatserverip}:{args.chatserverport}")
         logging.info(f"Using Ollama model: {MODEL}")
     except Exception as e:
         logging.error(f"Failed to connect to chat server: {e}")
