@@ -30,15 +30,55 @@ import argparse
 import threading
 import sys
 import socket
-import json
 import requests
 import logging
 from datetime import datetime
 import os
-
+from collections import deque
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "llama3.1"  # Change this to your preferred model
+#MODEL = "llama3.1"  # Change this to your preferred model
+MODEL = "smollm2"
+
+class ChatHistory:
+    def __init__(self):
+        self.messages = deque()
+        self.history_file = 'history_file.txt'
+        self.lock = threading.Lock()
+
+    def setup(self, session_timestamp):
+        """Setup the history file"""
+        if not os.path.exists('logs'):
+            os.makedirs('logs')
+        self.history_file = f'logs/chat_history_{session_timestamp}.txt'
+        
+    def add_message(self, role, content):
+        """Add a message to history and save to file"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        message = {
+            'timestamp': timestamp,
+            'role': role,
+            'content': content
+        }
+        
+        with self.lock:
+            self.messages.append(message)
+            # Save to file
+            with open(self.history_file, 'a', encoding='utf-8') as f:
+                f.write(f"[{timestamp}] {role}: {content}\n")
+    
+    def get_full_history(self):
+        """Return the full conversation history"""
+        with self.lock:
+            return list(self.messages)
+
+    def get_context_window(self, window_size=10):
+        """Get the last n messages for context"""
+        with self.lock:
+            return list(self.messages)[-window_size:]
+
+# Global chat history instance
+chat_history = ChatHistory()
 
 def setup_logging():
     """Setup logging configuration"""
@@ -65,9 +105,15 @@ def query_ollama(prompt):
     """Send a prompt to Ollama and return the response"""
     try:
         logging.info(f"Sending prompt to Ollama (length: {len(prompt)} chars)")
+
+        context = chat_history.get_context_window()
+        context_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context[-100:]])
+        full_prompt = f"Previous conversation:\n{context_str}\n\nCurrent message: {prompt}"
+
+
         data = {
             "model": MODEL,
-            "prompt": prompt,
+            "prompt": full_prompt,
             "stream": False
         }
         response = requests.post(OLLAMA_URL, json=data)
@@ -82,41 +128,55 @@ def query_ollama(prompt):
 def handle_incoming_message(message, sock):
     """Process incoming message through Ollama and send response back"""
     try:
-        # Get response from Ollama
-        ollama_response = query_ollama(message)
+        # Skip announcement messages
+        if message.startswith('<announce>'):
+            logging.info(f"Skipping announcement: {message}")
+            return
+
         logging.info(f"Processing message: {message[:10000]}..." if len(message) > 10000 else f"Processing message: {message}")
 
+        # Add user message to history
+        chat_history.add_message('User', message)
+
+        # Get response from Ollama
+        ollama_response = query_ollama(message)
+
+        # Add assistant response to history
+        chat_history.add_message('Assistant', ollama_response)
+
         # Send response back through the socket
-        response_message = f"Agent Smith: {ollama_response}"
+        response_message = f"Agent Eva: {ollama_response}"
         response_message += '\n'
         sock.send(response_message.encode('utf-8'))
         logging.info("Response sent back to chat")
     except Exception as e:
         error_message = f"Error processing message: {e}"
         logging.error(error_message)
-        sock.send(error_message.encode('utf-8'))
+        try:
+            sock.send(error_message.encode('utf-8'))
+        except:
+            logging.error("Failed to send error message back to socket")
 
 def receive_messages(sock):
-    """Receive messages from the server and process them through Ollama"""
+    """Receive messages from the server and process them"""
     while True:
         try:
             data = sock.recv(1024).decode('utf-8')
             if not data:
                 logging.warning("Disconnected from server")
-                print("\nDisconnected from server")
                 sys.exit(0)
 
-            logging.info(f"Received new message from chat (length: {len(data)} chars)")
-            
-            print(f"\nReceived message: {data}")
-            # Process message through Ollama in a separate thread
-            processing_thread = threading.Thread(
-                target=handle_incoming_message,
-                args=(data, sock)
-            )
-            processing_thread.start()
-            logging.info("Started processing thread for message")
-            
+            logging.info(f"Received new message from chat: {data}")
+
+            # Process all non-empty messages
+            if data.strip():
+                processing_thread = threading.Thread(
+                    target=handle_incoming_message,
+                    args=(data, sock)
+                )
+                processing_thread.start()
+                logging.info("Started processing thread for message")
+
         except Exception as e:
             logging.error(f"Error receiving message: {e}")
             sys.exit(1)
