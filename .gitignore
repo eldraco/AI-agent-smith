@@ -1,0 +1,4 @@
+history_file.txt
+__pycache__/*
+logs/*
+venv/*
