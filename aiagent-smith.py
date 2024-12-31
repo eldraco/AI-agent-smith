@@ -38,8 +38,8 @@ from collections import deque
 import re
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-#MODEL = "llama3.1"  # Change this to your preferred model
-MODEL = "smollm2"
+MODEL = "llama3.1"  # Change this to your preferred model
+#MODEL = "smollm2"
 
 class ChatHistory:
     def __init__(self):
@@ -220,6 +220,11 @@ def main():
                         required=False,
                         default=11434,
                         type=int)
+    parser.add_argument('-p', '--personality',
+                        help='Personality of the agent',
+                        required=True,
+                        default='personality.yml',
+                        type=str)
     args = parser.parse_args()
 
     # Setup logging
@@ -236,6 +241,11 @@ def main():
         logging.error(f"Failed to connect to chat server: {e}")
         sys.exit(1)
 
+    # Add the personality to the chat history so it is at the beginning
+    with open(args.personality, 'r', encoding='utf-8') as f:
+        personality = f.read()
+        chat_history.add_message('Personality', personality) # Add personality to history
+    
     # Start receive thread from the chat server
     receive_thread = threading.Thread(target=receive_messages, args=(sock,))
     receive_thread.daemon = True
