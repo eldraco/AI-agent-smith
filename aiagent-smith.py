@@ -220,7 +220,7 @@ def main():
                         required=False,
                         default=11434,
                         type=int)
-    parser.add_argument('-p', '--personality',
+    parser.add_argument('-n', '--personality',
                         help='Personality of the agent',
                         required=True,
                         default='personality.yml',
