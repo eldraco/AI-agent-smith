@@ -123,14 +123,19 @@ def build_prompt(prompt, args, memory_lines):
 
     # Tool prompt
     tool_prompt = f"""
-    You have acess to the function '{function_name}' to '{function_description}'. Using parameters: {str(function_parameters)}
+    You have access to the function '{function_name}' to '{function_description}'. Using parameters: {str(function_parameters)}
 
     If you choose to call a function ONLY reply in the following format with no prefix or suffix:
 
-    <function=example_function_name>{{"parameter_name": "parameter_value"}}</function>
+    {{
+      "function": "{function_name}",
+      "parameters": {{
+        "parameter_name": "parameter_value"
+      }}
+    }}
 
     Reminder:
-    - Function calls MUST follow the specified format, start with <function= and end with </function>
+    - Function calls MUST follow the specified format
     - Pay attention to the correct format
     - Required parameters MUST be specified
     - Put the entire function call reply on one line
@@ -149,6 +154,7 @@ def query_ollama(prompt, args, memory_lines):
     """Send a prompt to Ollama and return the response"""
     try:
         logging.info(f"Sending prompt to Ollama (length: {len(prompt)} chars)")
+        logging.info(f"Prompt: {prompt}")
 
         full_prompt = build_prompt(prompt, args, memory_lines)
 
@@ -161,6 +167,7 @@ def query_ollama(prompt, args, memory_lines):
         response.raise_for_status()
         response_text = response.json()['response']
         logging.info(f"Received response from Ollama (length: {len(response_text)} chars)")
+        logging.info(f"Ollama Response: {response_text}")
         return response_text
     except Exception as e:
         logging.error(f"Error querying Ollama: {e}")
@@ -186,7 +193,10 @@ def check_and_call_function(response, sock, personality):
             query_type = arguments.get("query_type")
             if query and query_type:
                 dns_response = query_dns(query, query_type)
+                if not dns_response:
+                    dns_response = "No data returned by the tool"
                 response_message = f"{personality['agent-name']}: {dns_response}\n"
+                logging.info(f"Tool Response: {response_message}")
                 return response_message
 
 def handle_incoming_message(message, sock, args, personality, memory_lines):
@@ -208,7 +218,7 @@ def handle_incoming_message(message, sock, args, personality, memory_lines):
         # Check and call function if necessary
         tool_response = check_and_call_function(ollama_response, sock, personality)
 
-        if tool_response:
+        if tool_response and tool_response.strip() != f"{personality['agent-name']}:":
             # Add tool response to history
             chat_history.add_message('Assistant', tool_response)
             send_response(sock, tool_response)
@@ -249,8 +259,8 @@ def receive_messages(sock, args, personality, memory_lines):
             sys.exit(1)
 
 def parse_tool_response(response: str):
-    function_regex = r"<function=(\w+)>(.*?)</function>"
-    match = re.search(function_regex, response)
+    function_regex = r'{\s*"function":\s*"(\w+)",\s*"parameters":\s*({.*?\s*.*?})\s*}'
+    match = re.search(function_regex, response, re.DOTALL)
 
     if match:
         function_name, args_string = match.groups()
