@@ -139,6 +139,8 @@ def build_prompt(prompt, args, memory_lines):
     - Pay attention to the correct format
     - Required parameters MUST be specified
     - Put the entire function call reply on one line
+    - Do not add anything to that JSON object.
+    - Keep the JSON format.
     """
 
     # Create the full prompt 
@@ -259,12 +261,14 @@ def receive_messages(sock, args, personality, memory_lines):
             sys.exit(1)
 
 def parse_tool_response(response: str):
-    function_regex = r'{\s*"function":\s*"(\w+)",\s*"parameters":\s*({.*?\s*.*?})\s*}'
+    function_regex = r'{\s*"function":\s*"(\w+)",\s*"parameters":\s*({.*?})\s*}'
     match = re.search(function_regex, response, re.DOTALL)
 
     if match:
         function_name, args_string = match.groups()
         try:
+            # Convert escaped characters to actual characters for JSON parsing
+            args_string = args_string.replace('\\n', '\n').replace('\\"', '"')
             args = json.loads(args_string)
             return {"function": function_name, "arguments": args}
         except json.JSONDecodeError as error:
