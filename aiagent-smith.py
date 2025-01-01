@@ -1,4 +1,3 @@
-#!/usr/bin/python
 #  Copyright (C) 2024  Sebastian Garcia
 #
 #  This program is free software; you can redistribute it and/or modify
@@ -36,6 +35,9 @@ from datetime import datetime
 import os
 from collections import deque
 import re
+import yaml
+import subprocess
+import json
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "llama3.1"  # Change this to your preferred model
@@ -102,19 +104,57 @@ def setup_logging():
     )
     return log_file
 
-def query_ollama(prompt):
+def build_prompt(prompt, args, memory_lines):
+    """Build the full prompt for Ollama"""
+    context = chat_history.get_context_window(memory_lines)
+    context_str = "\n".join([f"user: {msg['content']}" for msg in context[-memory_lines:]])
+
+    # Load personality data 
+    with open(args.personality, 'r', encoding='utf-8') as f:
+        personality_data = yaml.safe_load(f)
+        agent_name = personality_data.get('agent-name', 'Unknown Agent')
+        description = personality_data.get('description', 'No description available')
+        function_name = personality_data.get('function_name', 'function_name')  
+        function_description = personality_data.get('function_description', 'function_description')
+        function_parameters = personality_data.get('function_parameters', 'function_parameters')
+
+    # Agent personality
+    personality = f"Agent Name: {agent_name}\nDescription: {description}"
+
+    # Tool prompt
+    tool_prompt = f"""
+    You have acess to the function '{function_name}' to '{function_description}'. Using parameters: {str(function_parameters)}
+
+    If you choose to call a function ONLY reply in the following format with no prefix or suffix:
+
+    <function=example_function_name>{{"parameter_name": "parameter_value"}}</function>
+
+    Reminder:
+    - Function calls MUST follow the specified format, start with <function= and end with </function>
+    - Pay attention to the correct format
+    - Required parameters MUST be specified
+    - Put the entire function call reply on one line
+    """
+
+    # Create the full prompt 
+    full_prompt = [
+        {"role": "personality", "content": personality},
+        {"role": "tool", "content": tool_prompt},
+        {"role": "user", "content": f"Previous conversation:\n{context_str}\n\nCurrent message: {prompt}"}
+    ]
+
+    return full_prompt
+
+def query_ollama(prompt, args, memory_lines):
     """Send a prompt to Ollama and return the response"""
     try:
         logging.info(f"Sending prompt to Ollama (length: {len(prompt)} chars)")
 
-        context = chat_history.get_context_window()
-        context_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context[-100:]])
-        full_prompt = f"Previous conversation:\n{context_str}\n\nCurrent message: {prompt}"
-
+        full_prompt = build_prompt(prompt, args, memory_lines)
 
         data = {
             "model": MODEL,
-            "prompt": full_prompt,
+            "prompt": str(full_prompt),
             "stream": False
         }
         response = requests.post(OLLAMA_URL, json=data)
@@ -126,7 +166,30 @@ def query_ollama(prompt):
         logging.error(f"Error querying Ollama: {e}")
         return f"Error querying Ollama: {e}"
 
-def handle_incoming_message(message, sock):
+def send_response(sock, message):
+    """Send a response message through the socket"""
+    try:
+        sock.send(message.encode('utf-8'))
+        logging.info("Response sent back to chat")
+    except Exception as e:
+        logging.error(f"Failed to send message: {e}")
+
+def check_and_call_function(response, sock, personality):
+    """Check if a function should be called and call it if necessary"""
+    parsed_response = parse_tool_response(response)
+    if parsed_response:
+        function_name = parsed_response["function"]
+        arguments = parsed_response["arguments"]
+
+        if function_name == "query_dns":
+            query = arguments.get("query")
+            query_type = arguments.get("query_type")
+            if query and query_type:
+                dns_response = query_dns(query, query_type)
+                response_message = f"{personality['agent-name']}: {dns_response}\n"
+                return response_message
+
+def handle_incoming_message(message, sock, args, personality, memory_lines):
     """Process incoming message through Ollama and send response back"""
     try:
         # Skip announcement messages
@@ -140,25 +203,27 @@ def handle_incoming_message(message, sock):
         chat_history.add_message('User', message)
 
         # Get response from Ollama
-        ollama_response = query_ollama(message)
+        ollama_response = query_ollama(message, args, memory_lines)
 
-        # Add assistant response to history
-        chat_history.add_message('Assistant', ollama_response)
+        # Check and call function if necessary
+        tool_response = check_and_call_function(ollama_response, sock, personality)
 
-        # Send response back through the socket
-        response_message = f"Agent Smith: {ollama_response}"
-        response_message += '\n'
-        sock.send(response_message.encode('utf-8'))
-        logging.info("Response sent back to chat")
+        if tool_response:
+            # Add tool response to history
+            chat_history.add_message('Assistant', tool_response)
+            send_response(sock, tool_response)
+        else:
+            # Add assistant response to history
+            chat_history.add_message('Assistant', ollama_response)
+            response_message = f"{personality['agent-name']}: {ollama_response}\n"
+            send_response(sock, response_message)
+
     except Exception as e:
         error_message = f"Error processing message: {e}"
         logging.error(error_message)
-        try:
-            sock.send(error_message.encode('utf-8'))
-        except:
-            logging.error("Failed to send error message back to socket")
+        send_response(sock, error_message)
 
-def receive_messages(sock):
+def receive_messages(sock, args, personality, memory_lines):
     """Receive messages from the server and process them"""
     while True:
         try:
@@ -174,7 +239,7 @@ def receive_messages(sock):
             if clean_data.strip():
                 processing_thread = threading.Thread(
                     target=handle_incoming_message,
-                    args=(data, sock)
+                    args=(data, sock, args, personality, memory_lines)
                 )
                 processing_thread.start()
                 logging.info("Started processing thread for message")
@@ -183,6 +248,33 @@ def receive_messages(sock):
             logging.error(f"Error receiving message: {e}")
             sys.exit(1)
 
+def parse_tool_response(response: str):
+    function_regex = r"<function=(\w+)>(.*?)</function>"
+    match = re.search(function_regex, response)
+
+    if match:
+        function_name, args_string = match.groups()
+        try:
+            args = json.loads(args_string)
+            return {"function": function_name, "arguments": args}
+        except json.JSONDecodeError as error:
+            logging.error(f"Error parsing function arguments: {error}")
+            return None
+    return None
+
+def query_dns(query: str, query_type: str) -> str:
+    """Query a DNS server for a specific record type"""
+    try:
+        result = subprocess.run(
+            ["dig", query, query_type, "+short"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error querying DNS: {e}")
+        return f"Error querying DNS: {e}"
 
 def main():
     print('AIAgent Smith: An AI Agent to follow your orders.')
@@ -222,8 +314,8 @@ def main():
                         type=int)
     parser.add_argument('-n', '--personality',
                         help='Personality of the agent',
-                        required=True,
-                        default='personality.yml',
+                        required=False,
+                        default='personality.yaml',
                         type=str)
     args = parser.parse_args()
 
@@ -241,13 +333,25 @@ def main():
         logging.error(f"Failed to connect to chat server: {e}")
         sys.exit(1)
 
-    # Add the personality to the chat history so it is at the beginning
+    # Load personality data 
     with open(args.personality, 'r', encoding='utf-8') as f:
-        personality = f.read()
-        chat_history.add_message('Personality', personality) # Add personality to history
-    
+        personality_data = yaml.safe_load(f)
+        agent_name = personality_data.get('agent-name', 'Unknown Agent')
+        description = personality_data.get('description', 'No description available')
+        function_name = personality_data.get('function_name', 'function_name')  
+        function_description = personality_data.get('function_description', 'function_description')
+        function_parameters = personality_data.get('function_parameters', 'function_parameters')
+        memory_lines = personality_data.get('memory_lines', 10)
+        personality = {
+            "agent-name": agent_name,
+            "description": description,
+            "function_name": function_name,
+            "function_description": function_description,
+            "function_parameters": function_parameters
+        }
+
     # Start receive thread from the chat server
-    receive_thread = threading.Thread(target=receive_messages, args=(sock,))
+    receive_thread = threading.Thread(target=receive_messages, args=(sock, args, personality, memory_lines))
     receive_thread.daemon = True
     receive_thread.start()
     logging.info("Message receiving thread started")
