@@ -14,4 +14,5 @@ function_parameters:
       description: "The type of query to be performed. For example, A, AAAA, MX, NS, etc."
   required:
     - query
+command: "dig {query} {query_type} +short"
 memory_lines: 1
