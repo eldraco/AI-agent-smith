@@ -139,7 +139,7 @@ def build_prompt(prompt, args, memory_lines):
     - Pay attention to the correct format
     - Required parameters MUST be specified
     - Put the entire function call reply on one line
-    - Do not add anything to that JSON object.
+    - Do not add anything to that JSON object. Do not add quotes, commas, or anything else.
     - Keep the JSON format.
     """
 
@@ -183,6 +183,22 @@ def send_response(sock, message):
     except Exception as e:
         logging.error(f"Failed to send message: {e}")
 
+def user_function(command_template: str, arguments: dict) -> str:
+    """Execute a user-defined command with the given arguments"""
+    try:
+        command = command_template.format(**arguments)
+        result = subprocess.run(
+            command.split(),
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        logging.info(f"Exact answer received by the tool: {result.stdout.strip()}")
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error executing command: {e}")
+        return f"Error executing command: {e}"
+
 def check_and_call_function(response, sock, personality):
     """Check if a function should be called and call it if necessary"""
     parsed_response = parse_tool_response(response)
@@ -190,16 +206,14 @@ def check_and_call_function(response, sock, personality):
         function_name = parsed_response["function"]
         arguments = parsed_response["arguments"]
 
-        if function_name == "query_dns":
-            query = arguments.get("query")
-            query_type = arguments.get("query_type")
-            if query and query_type:
-                dns_response = query_dns(query, query_type)
-                if not dns_response:
-                    dns_response = "No data returned by the tool"
-                response_message = f"{personality['agent-name']}: {dns_response}\n"
-                logging.info(f"Tool Response: {response_message}")
-                return response_message
+        if function_name == personality["function_name"]:
+            command_template = personality["command"]
+            result = user_function(command_template, arguments)
+            if not result:
+                result = "No data returned by the tool"
+            response_message = f"{personality['agent-name']}: {result}\n"
+            logging.info(f"Tool Response: {response_message}")
+            return response_message
 
 def handle_incoming_message(message, sock, args, personality, memory_lines):
     """Process incoming message through Ollama and send response back"""
@@ -261,8 +275,10 @@ def receive_messages(sock, args, personality, memory_lines):
             sys.exit(1)
 
 def parse_tool_response(response: str):
-    function_regex = r'{\s*"function":\s*"(\w+)",\s*"parameters":\s*({.*?})\s*}'
-    match = re.search(function_regex, response, re.DOTALL)
+    function_regex_escaped = r'{\\n\s*"function":\s*"(\w+)",\\n\s*"parameters":\s*({.*?})\\n\s*}'
+    function_regex_actual = r'{\s*"function":\s*"(\w+)",\s*"parameters":\s*({.*?})\s*}'
+
+    match = re.search(function_regex_escaped, response, re.DOTALL) or re.search(function_regex_actual, response, re.DOTALL)
 
     if match:
         function_name, args_string = match.groups()
@@ -289,6 +305,11 @@ def query_dns(query: str, query_type: str) -> str:
     except subprocess.CalledProcessError as e:
         logging.error(f"Error querying DNS: {e}")
         return f"Error querying DNS: {e}"
+
+def send_initial_greeting(sock, personality):
+    """Send the agent's name and description when connecting to the chat server"""
+    greeting_message = f"Hi, my name is {personality['agent-name']}.\n{personality['description']}\n"
+    send_response(sock, greeting_message)
 
 def main():
     print('AIAgent Smith: An AI Agent to follow your orders.')
@@ -355,14 +376,19 @@ def main():
         function_name = personality_data.get('function_name', 'function_name')  
         function_description = personality_data.get('function_description', 'function_description')
         function_parameters = personality_data.get('function_parameters', 'function_parameters')
+        command = personality_data.get('command', 'command')
         memory_lines = personality_data.get('memory_lines', 10)
         personality = {
             "agent-name": agent_name,
             "description": description,
             "function_name": function_name,
             "function_description": function_description,
-            "function_parameters": function_parameters
+            "function_parameters": function_parameters,
+            "command": command
         }
+
+    # Send initial greeting
+    send_initial_greeting(sock, personality)
 
     # Start receive thread from the chat server
     receive_thread = threading.Thread(target=receive_messages, args=(sock, args, personality, memory_lines))
